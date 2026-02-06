@@ -26,7 +26,7 @@
     },
     {
       "id": "p3",
-      "name": "Extract Keywords",
+      "name": "Extract Search Phrases",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [-420, 100],
@@ -48,45 +48,47 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ { model: 'gpt-4o-mini', response_format: { type: 'json_object' }, messages: [ { role: 'system', content: 'Return JSON: {\\\"keywords\\\":[\\\"...\\\"]}. 3-8 concise keywords for prediction markets.' }, { role: 'user', content: $json.question } ], temperature: 0.2 } }}"
+        "jsonBody": "={{ { model: 'gpt-4o-mini', response_format: { type: 'json_object' }, messages: [ { role: 'system', content: 'You convert user questions into prediction-market search queries. Return JSON: {\"entity\":\"<primary subject>\",\"queries\":[\"<phrase1>\",\"<phrase2>\"]}. Rules: 1) entity = the main named subject (company, person, country, event). 2) queries = 1-3 SHORT search phrases (2-5 words each) that would match real prediction-market titles. Use the specific entity name in each phrase. 3) Do NOT add generic terms like stock market, investment, financial news, predictions. 4) Think: what would a Polymarket question title literally say?' }, { role: 'user', content: $json.question } ], temperature: 0.1 } }}"
       }
     },
     {
       "id": "p4",
-      "name": "Parse Keywords",
+      "name": "Parse Search Phrases",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [-200, 100],
       "parameters": {
-        "jsCode": "let parsed = {};\ntry { parsed = JSON.parse($json.choices?.[0]?.message?.content ?? '{}'); } catch {}\nconst keywords = Array.isArray(parsed.keywords) ? parsed.keywords.map((k) => String(k).trim()).filter(Boolean).slice(0, 8) : [];\nif (!keywords.length) keywords.push('general market');\nconst question = $('Validate Input').first().json.question;\nreturn [{ json: { question, keywordsQuery: keywords.join(', ') } }];"
+        "jsCode": "let parsed = {};\ntry { parsed = JSON.parse($json.choices?.[0]?.message?.content ?? '{}'); } catch {}\n\nconst entity = String(parsed.entity ?? '').trim();\nconst queries = Array.isArray(parsed.queries)\n  ? parsed.queries.map((q) => String(q).trim()).filter(Boolean).slice(0, 3)\n  : [];\n\nif (!queries.length) {\n  // Fallback: use the entity or first few words of the question\n  const fallback = entity || $('Validate Input').first().json.question.split(' ').slice(0, 4).join(' ');\n  queries.push(fallback);\n}\n\nconst question = $('Validate Input').first().json.question;\nreturn [{ json: { question, entity, queries } }];"
       }
     },
     {
       "id": "p5",
-      "name": "Search Polymarket",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
+      "name": "Multi Search Polymarket",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
       "position": [20, 100],
       "parameters": {
-        "method": "GET",
-        "url": "https://gamma-api.polymarket.com/markets",
-        "sendQuery": true,
-        "queryParameters": {
-          "parameters": [
-            {
-              "name": "search",
-              "value": "={{$json.keywordsQuery}}"
-            },
-            {
-              "name": "limit",
-              "value": "12"
-            },
-            {
-              "name": "active",
-              "value": "true"
-            }
-          ]
-        }
+        "jsCode": "const { entity, queries, question } = $json;\nconst allMarkets = [];\nconst seenIds = new Set();\n\nfor (const query of queries) {\n  try {\n    const url = `https://gamma-api.polymarket.com/markets?search=${encodeURIComponent(query)}&limit=15&active=true&closed=false&order=volume24hr&ascending=false`;\n    const resp = await fetch(url, { signal: AbortSignal.timeout(15000) });\n    if (!resp.ok) continue;\n    const data = await resp.json();\n    const markets = Array.isArray(data) ? data : (data?.data ?? data?.markets ?? []);\n    for (const m of markets) {\n      const mid = String(m.id ?? m.slug ?? m.question ?? '');\n      if (!seenIds.has(mid)) {\n        seenIds.add(mid);\n        allMarkets.push(m);\n      }\n    }\n  } catch {}\n}\n\nreturn [{ json: { question, entity, queries, rawMarkets: allMarkets } }];"
+      }
+    },
+    {
+      "id": "p5b",
+      "name": "Filter Relevant Markets",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [240, 100],
+      "parameters": {
+        "jsCode": "const { question, entity, queries, rawMarkets } = $json;\n\nconst entityLower = (entity || '').toLowerCase();\nconst queryWords = queries.map(q => q.toLowerCase());\n\nfunction scoreMarket(m) {\n  const title = String(m.question ?? m.title ?? '').toLowerCase();\n  let score = 0;\n\n  // Entity match (strongest signal)\n  if (entityLower && title.includes(entityLower)) score += 50;\n\n  // Query phrase partial match\n  for (const q of queryWords) {\n    const words = q.split(/\\s+/);\n    const matchCount = words.filter(w => w.length > 2 && title.includes(w)).length;\n    score += (matchCount / Math.max(words.length, 1)) * 20;\n  }\n\n  // Volume bonus (higher volume = more reliable)\n  const vol = Number(m.volume ?? m.volumeNum ?? 0);\n  if (vol > 1000000) score += 15;\n  else if (vol > 100000) score += 10;\n  else if (vol > 10000) score += 5;\n\n  // Recency bonus\n  const created = new Date(m.createdAt ?? m.startDate ?? 0);\n  const ageMs = Date.now() - created.getTime();\n  const ageDays = ageMs / (1000 * 60 * 60 * 24);\n  if (ageDays < 30) score += 10;\n  else if (ageDays < 90) score += 5;\n\n  return score;\n}\n\nconst scored = rawMarkets\n  .map(m => ({ market: m, score: scoreMarket(m) }))\n  .filter(s => s.score >= 20)\n  .sort((a, b) => b.score - a.score)\n  .slice(0, 10);\n\nconst filtered = scored.map(s => s.market);\n\nreturn [{ json: { question, entity, markets: filtered, marketCount: filtered.length, hasResults: filtered.length > 0 } }];"
+      }
+    },
+    {
+      "id": "p5c",
+      "name": "Slim Markets",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [460, 100],
+      "parameters": {
+        "jsCode": "const { question, entity, markets, marketCount, hasResults } = $json;\n\nif (!hasResults) {\n  return [{ json: { question, entity, marketCount: 0, hasResults: false, marketsCompact: [] } }];\n}\n\nconst toNum = (v) => { const n = Number(v); return Number.isFinite(n) ? n : null; };\n\nconst marketsCompact = markets.map(m => ({\n  title: String(m.question ?? m.title ?? 'Untitled'),\n  volume: toNum(m.volume ?? m.volumeNum ?? m.liquidity),\n  yes: toNum(m.yesPrice ?? m.outcomePrices?.[0] ?? m.probabilityYes),\n  no: toNum(m.noPrice ?? m.outcomePrices?.[1] ?? m.probabilityNo),\n  active: m.active ?? true\n}));\n\nreturn [{ json: { question, entity, marketCount, hasResults: true, marketsCompact } }];"
       }
     },
     {
@@ -94,7 +96,7 @@
       "name": "Generate Summary",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [240, 100],
+      "position": [680, 100],
       "parameters": {
         "method": "POST",
         "url": "https://api.openai.com/v1/chat/completions",
@@ -113,7 +115,10 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ { model: 'gpt-4o-mini', messages: [ { role: 'system', content: 'Write a concise 180-260 word market summary based only on the provided data. Mention uncertainty when data is thin.' }, { role: 'user', content: JSON.stringify({ question: $('Parse Keywords').first().json.question, markets: $json }) } ], temperature: 0.3 } }}"
+        "jsonBody": "={{ { model: 'gpt-4o-mini', messages: [ { role: 'system', content: $json.hasResults ? 'Write a concise 180-260 word market summary based only on the provided prediction market data. Mention uncertainty when data is thin. Focus on what the markets signal about the question asked.' : 'The user asked a question but no relevant prediction markets were found. Write a brief 80-120 word response explaining that no active Polymarket markets match this topic. Suggest the user try rephrasing or checking if the topic has active prediction markets.' }, { role: 'user', content: JSON.stringify({ question: $json.question, markets: $json.marketsCompact }) } ], temperature: 0.3 } }}",
+        "options": {
+          "timeout": 30000
+        }
       }
     },
     {
@@ -121,9 +126,9 @@
       "name": "Build Response",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [460, 100],
+      "position": [900, 100],
       "parameters": {
-        "jsCode": "const summary = String($json.choices?.[0]?.message?.content ?? '').trim();\nif (!summary) throw new Error('Missing summary');\nreturn [{ json: { summary } }];"
+        "jsCode": "const summary = String($json.choices?.[0]?.message?.content ?? '').trim();\nif (!summary) throw new Error('Missing summary');\nconst slim = $('Slim Markets').first().json;\nreturn [{ json: { summary, market_count: slim.marketCount, has_results: slim.hasResults } }];"
       }
     },
     {
@@ -131,7 +136,7 @@
       "name": "Respond Preview",
       "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1.4,
-      "position": [680, 100],
+      "position": [1120, 100],
       "parameters": {
         "respondWith": "json",
         "responseBody": "={{$json}}"
@@ -154,36 +159,58 @@
       "main": [
         [
           {
-            "node": "Extract Keywords",
+            "node": "Extract Search Phrases",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Extract Keywords": {
+    "Extract Search Phrases": {
       "main": [
         [
           {
-            "node": "Parse Keywords",
+            "node": "Parse Search Phrases",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Parse Keywords": {
+    "Parse Search Phrases": {
       "main": [
         [
           {
-            "node": "Search Polymarket",
+            "node": "Multi Search Polymarket",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Search Polymarket": {
+    "Multi Search Polymarket": {
+      "main": [
+        [
+          {
+            "node": "Filter Relevant Markets",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filter Relevant Markets": {
+      "main": [
+        [
+          {
+            "node": "Slim Markets",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slim Markets": {
       "main": [
         [
           {
@@ -222,5 +249,5 @@
   },
   "active": false,
   "pinData": {},
-  "versionId": "polyinsights-preview-v1"
+  "versionId": "polyinsights-preview-v2"
 }

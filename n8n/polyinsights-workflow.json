@@ -49,7 +49,7 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ {\n  model: 'gpt-4o-mini',\n  response_format: { type: 'json_object' },\n  messages: [\n    {\n      role: 'system',\n      content: 'You are an analyst extracting market-search intent from user questions. Return ONLY JSON with keys: keywords (array 3-8), sophistication_label (low|high), sophistication_score (0-100). No extra keys.'\n    },\n    {\n      role: 'user',\n      content: $json.question\n    }\n  ],\n  temperature: 0.2\n} }}",
+        "jsonBody": "={{ {\n  model: 'gpt-4o-mini',\n  response_format: { type: 'json_object' },\n  messages: [\n    {\n      role: 'system',\n      content: 'You are an analyst converting user questions into prediction-market search queries. Return ONLY JSON with keys: entity (string - the primary named subject: company, person, country, event), queries (array of 1-3 SHORT search phrases, 2-5 words each, that would match real Polymarket question titles - use the entity name in each phrase), sophistication_label (low|high), sophistication_score (0-100). Rules: Do NOT add generic terms like stock market, investment, financial news, predictions. Think: what would a Polymarket question title literally say?'\n    },\n    {\n      role: 'user',\n      content: $json.question\n    }\n  ],\n  temperature: 0.1\n} }}",
         "options": {
           "timeout": 30000
         }
@@ -62,7 +62,7 @@
       "typeVersion": 2,
       "position": [-660, -220],
       "parameters": {
-        "jsCode": "const openai = $json;\nconst content = openai?.choices?.[0]?.message?.content ?? '{}';\nlet parsed;\ntry {\n  parsed = JSON.parse(content);\n} catch {\n  parsed = {};\n}\n\nconst keywords = Array.isArray(parsed.keywords)\n  ? parsed.keywords.map(k => String(k).trim()).filter(Boolean).slice(0, 8)\n  : [];\n\nif (keywords.length === 0) {\n  keywords.push('general market');\n}\n\nconst label = parsed.sophistication_label === 'high' ? 'high' : 'low';\nlet score = Number(parsed.sophistication_score);\nif (!Number.isFinite(score)) score = label === 'high' ? 70 : 40;\nscore = Math.max(0, Math.min(100, Math.round(score)));\n\nconst question = $('Validate Analyze Input').first().json.question;\nconst userId = $('Validate Analyze Input').first().json.user_id;\n\nreturn [{\n  json: {\n    question,\n    user_id: userId,\n    keywords,\n    keywordsQuery: keywords.join(', '),\n    sophistication_label: label,\n    sophistication_score: score\n  }\n}];"
+        "jsCode": "const openai = $json;\nconst content = openai?.choices?.[0]?.message?.content ?? '{}';\nlet parsed;\ntry {\n  parsed = JSON.parse(content);\n} catch {\n  parsed = {};\n}\n\nconst entity = String(parsed.entity ?? '').trim();\nconst queries = Array.isArray(parsed.queries)\n  ? parsed.queries.map(q => String(q).trim()).filter(Boolean).slice(0, 3)\n  : [];\n\nif (queries.length === 0) {\n  // Fallback: use entity or first few words of the question\n  const fallback = entity || $('Validate Analyze Input').first().json.question.split(' ').slice(0, 4).join(' ');\n  queries.push(fallback);\n}\n\nconst label = parsed.sophistication_label === 'high' ? 'high' : 'low';\nlet score = Number(parsed.sophistication_score);\nif (!Number.isFinite(score)) score = label === 'high' ? 70 : 40;\nscore = Math.max(0, Math.min(100, Math.round(score)));\n\nconst question = $('Validate Analyze Input').first().json.question;\nconst userId = $('Validate Analyze Input').first().json.user_id;\n\nreturn [{\n  json: {\n    question,\n    user_id: userId,\n    entity,\n    queries,\n    sophistication_label: label,\n    sophistication_score: score\n  }\n}];"
       }
     },
     {
@@ -102,33 +102,22 @@
     },
     {
       "id": "a6",
-      "name": "Search Polymarket",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
+      "name": "Multi Search Polymarket",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
       "position": [-220, -220],
       "parameters": {
-        "method": "GET",
-        "url": "https://gamma-api.polymarket.com/markets",
-        "sendQuery": true,
-        "queryParameters": {
-          "parameters": [
-            {
-              "name": "search",
-              "value": "={{$('Parse Intent').first().json.keywordsQuery}}"
-            },
-            {
-              "name": "limit",
-              "value": "20"
-            },
-            {
-              "name": "active",
-              "value": "true"
-            }
-          ]
-        },
-        "options": {
-          "timeout": 30000
-        }
+        "jsCode": "const intent = $('Parse Intent').first().json;\nconst { entity, queries } = intent;\nconst allMarkets = [];\nconst seenIds = new Set();\n\nfor (const query of queries) {\n  try {\n    const url = `https://gamma-api.polymarket.com/markets?search=${encodeURIComponent(query)}&limit=15&active=true&closed=false&order=volume24hr&ascending=false`;\n    const resp = await fetch(url, { signal: AbortSignal.timeout(15000) });\n    if (!resp.ok) continue;\n    const data = await resp.json();\n    const markets = Array.isArray(data) ? data : (data?.data ?? data?.markets ?? []);\n    for (const m of markets) {\n      const mid = String(m.id ?? m.slug ?? m.question ?? '');\n      if (!seenIds.has(mid)) {\n        seenIds.add(mid);\n        allMarkets.push(m);\n      }\n    }\n  } catch {}\n}\n\nreturn [{ json: { rawMarkets: allMarkets } }];"
+      }
+    },
+    {
+      "id": "a6b",
+      "name": "Filter Relevant Markets",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [0, -220],
+      "parameters": {
+        "jsCode": "const intent = $('Parse Intent').first().json;\nconst { entity, queries } = intent;\nconst { rawMarkets } = $json;\n\nconst entityLower = (entity || '').toLowerCase();\nconst queryWords = queries.map(q => q.toLowerCase());\n\nfunction scoreMarket(m) {\n  const title = String(m.question ?? m.title ?? '').toLowerCase();\n  let score = 0;\n\n  // Entity match (strongest signal)\n  if (entityLower && title.includes(entityLower)) score += 50;\n\n  // Query phrase partial match\n  for (const q of queryWords) {\n    const words = q.split(/\\s+/);\n    const matchCount = words.filter(w => w.length > 2 && title.includes(w)).length;\n    score += (matchCount / Math.max(words.length, 1)) * 20;\n  }\n\n  // Volume bonus (higher volume = more reliable)\n  const vol = Number(m.volume ?? m.volumeNum ?? 0);\n  if (vol > 1000000) score += 15;\n  else if (vol > 100000) score += 10;\n  else if (vol > 10000) score += 5;\n\n  // Recency bonus\n  const created = new Date(m.createdAt ?? m.startDate ?? 0);\n  const ageMs = Date.now() - created.getTime();\n  const ageDays = ageMs / (1000 * 60 * 60 * 24);\n  if (ageDays < 30) score += 10;\n  else if (ageDays < 90) score += 5;\n\n  return score;\n}\n\nconst scored = rawMarkets\n  .map(m => ({ market: m, score: scoreMarket(m) }))\n  .filter(s => s.score >= 20)\n  .sort((a, b) => b.score - a.score)\n  .slice(0, 15);\n\nconst filtered = scored.map(s => s.market);\n\nreturn [{ json: { markets: filtered, marketCount: filtered.length, hasResults: filtered.length > 0 } }];"
       }
     },
     {
@@ -136,9 +125,9 @@
       "name": "Prepare Market Rows",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [0, -220],
+      "position": [220, -220],
       "parameters": {
-        "jsCode": "const queryRow = $('Insert Query').first().json?.[0] ?? $('Insert Query').first().json;\nconst queryId = queryRow.id;\nif (!queryId) throw new Error('Missing query id from Supabase insert');\n\nconst base = $('Parse Intent').first().json;\nconst response = $json;\nconst markets = Array.isArray(response) ? response : (response?.data ?? response?.markets ?? []);\n\nconst toNum = (v) => {\n  const n = Number(v);\n  return Number.isFinite(n) ? n : null;\n};\n\nconst rows = markets.slice(0, 20).map((m) => {\n  const yes = toNum(m.yesPrice ?? m.outcomePrices?.[0] ?? m.probabilityYes);\n  const no = toNum(m.noPrice ?? m.outcomePrices?.[1] ?? m.probabilityNo);\n  let sentiment = 'neutral';\n  if (yes != null && no != null) {\n    if (yes - no > 0.1) sentiment = 'bullish';\n    else if (no - yes > 0.1) sentiment = 'bearish';\n    else sentiment = 'mixed';\n  }\n\n  return {\n    query_id: queryId,\n    market_id: String(m.id ?? m.slug ?? ''),\n    market_title: String(m.question ?? m.title ?? 'Untitled market'),\n    volume_numeric: toNum(m.volume ?? m.volumeNum ?? m.liquidity),\n    yes_probability: yes,\n    no_probability: no,\n    sentiment,\n    source: 'polymarket',\n    raw_payload: m\n  };\n});\n\nconst compact = rows.map(r => ({\n  title: r.market_title,\n  volume: r.volume_numeric,\n  yes: r.yes_probability,\n  no: r.no_probability,\n  sentiment: r.sentiment\n}));\n\nreturn [{\n  json: {\n    query_id: queryId,\n    question: base.question,\n    sophistication_label: base.sophistication_label,\n    sophistication_score: base.sophistication_score,\n    user_id: base.user_id,\n    market_rows: rows,\n    market_compact: compact\n  }\n}];"
+        "jsCode": "const queryRow = $('Insert Query').first().json?.[0] ?? $('Insert Query').first().json;\nconst queryId = queryRow.id;\nif (!queryId) throw new Error('Missing query id from Supabase insert');\n\nconst base = $('Parse Intent').first().json;\nconst { markets, marketCount, hasResults } = $json;\n\nconst toNum = (v) => {\n  const n = Number(v);\n  return Number.isFinite(n) ? n : null;\n};\n\nconst rows = markets.map((m) => {\n  const yes = toNum(m.yesPrice ?? m.outcomePrices?.[0] ?? m.probabilityYes);\n  const no = toNum(m.noPrice ?? m.outcomePrices?.[1] ?? m.probabilityNo);\n  let sentiment = 'neutral';\n  if (yes != null && no != null) {\n    if (yes - no > 0.1) sentiment = 'bullish';\n    else if (no - yes > 0.1) sentiment = 'bearish';\n    else sentiment = 'mixed';\n  }\n\n  return {\n    query_id: queryId,\n    market_id: String(m.id ?? m.slug ?? ''),\n    market_title: String(m.question ?? m.title ?? 'Untitled market'),\n    volume_numeric: toNum(m.volume ?? m.volumeNum ?? m.liquidity),\n    yes_probability: yes,\n    no_probability: no,\n    sentiment,\n    source: 'polymarket',\n    raw_payload: m\n  };\n});\n\nconst compact = rows.map(r => ({\n  title: r.market_title,\n  volume: r.volume_numeric,\n  yes: r.yes_probability,\n  no: r.no_probability,\n  sentiment: r.sentiment\n}));\n\nreturn [{\n  json: {\n    query_id: queryId,\n    question: base.question,\n    entity: base.entity,\n    sophistication_label: base.sophistication_label,\n    sophistication_score: base.sophistication_score,\n    user_id: base.user_id,\n    market_rows: rows,\n    market_compact: compact,\n    market_count: marketCount,\n    has_results: hasResults\n  }\n}];"
       }
     },
     {
@@ -146,7 +135,7 @@
       "name": "Insert Market Data",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [220, -220],
+      "position": [440, -220],
       "parameters": {
         "method": "POST",
         "url": "={{$env.SUPABASE_URL + '/rest/v1/market_data'}}",
@@ -177,7 +166,7 @@
       "name": "Generate Summary",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [440, -220],
+      "position": [660, -220],
       "parameters": {
         "method": "POST",
         "url": "https://api.openai.com/v1/chat/completions",
@@ -196,7 +185,7 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ {\n  model: 'gpt-4o-mini',\n  messages: [\n    {\n      role: 'system',\n      content: 'Write a 200-300 word executive summary with headings: Market Signal, What Drives It, Risks / Blind Spots. Use only supplied market data. If data is sparse, say confidence is low.'\n    },\n    {\n      role: 'user',\n      content: JSON.stringify({\n        question: $json.question,\n        markets: $json.market_compact\n      })\n    }\n  ],\n  temperature: 0.3\n} }}",
+        "jsonBody": "={{ {\n  model: 'gpt-4o-mini',\n  messages: [\n    {\n      role: 'system',\n      content: $('Prepare Market Rows').first().json.has_results\n        ? 'Write a 200-300 word executive summary with headings: Market Signal, What Drives It, Risks / Blind Spots. Use only supplied market data. If data is sparse, say confidence is low.'\n        : 'The user asked a question but no relevant prediction markets were found. Write a brief 100-150 word response explaining that no active Polymarket markets closely match this topic. Acknowledge the question, note the lack of prediction market coverage, and suggest the user try rephrasing or broadening their question.'\n    },\n    {\n      role: 'user',\n      content: JSON.stringify({\n        question: $('Prepare Market Rows').first().json.question,\n        markets: $('Prepare Market Rows').first().json.market_compact\n      })\n    }\n  ],\n  temperature: 0.3\n} }}",
         "options": {
           "timeout": 45000
         }
@@ -207,9 +196,9 @@
       "name": "Parse Summary",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [660, -220],
+      "position": [880, -220],
       "parameters": {
-        "jsCode": "const summary = $json?.choices?.[0]?.message?.content?.trim();\nif (!summary) throw new Error('Missing summary from model output');\n\nconst prep = $('Prepare Market Rows').first().json;\n\nreturn [{\n  json: {\n    query_id: prep.query_id,\n    user_id: prep.user_id,\n    summary_text: summary,\n    sophistication_label: prep.sophistication_label,\n    sophistication_score: prep.sophistication_score,\n    market_count: Array.isArray(prep.market_rows) ? prep.market_rows.length : 0\n  }\n}];"
+        "jsCode": "const summary = $json?.choices?.[0]?.message?.content?.trim();\nif (!summary) throw new Error('Missing summary from model output');\n\nconst prep = $('Prepare Market Rows').first().json;\n\nreturn [{\n  json: {\n    query_id: prep.query_id,\n    user_id: prep.user_id,\n    summary_text: summary,\n    sophistication_label: prep.sophistication_label,\n    sophistication_score: prep.sophistication_score,\n    market_count: prep.market_count,\n    has_results: prep.has_results\n  }\n}];"
       }
     },
     {
@@ -217,7 +206,7 @@
       "name": "Upsert Summary",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [880, -220],
+      "position": [1100, -220],
       "parameters": {
         "method": "POST",
         "url": "={{$env.SUPABASE_URL + '/rest/v1/summaries'}}",
@@ -252,7 +241,7 @@
       "name": "Update Query Review",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [1100, -220],
+      "position": [1320, -220],
       "parameters": {
         "method": "PATCH",
         "url": "={{$env.SUPABASE_URL + '/rest/v1/queries?id=eq.' + $('Parse Summary').first().json.query_id}}",
@@ -283,9 +272,9 @@
       "name": "Build Analyze Response",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [1320, -220],
+      "position": [1540, -220],
       "parameters": {
-        "jsCode": "const parsed = $('Parse Summary').first().json;\nreturn [{\n  json: {\n    session_id: parsed.query_id,\n    summary: parsed.summary_text,\n    sophistication_label: parsed.sophistication_label,\n    sophistication_score: parsed.sophistication_score,\n    market_count: parsed.market_count\n  }\n}];"
+        "jsCode": "const parsed = $('Parse Summary').first().json;\nreturn [{\n  json: {\n    session_id: parsed.query_id,\n    summary: parsed.summary_text,\n    sophistication_label: parsed.sophistication_label,\n    sophistication_score: parsed.sophistication_score,\n    market_count: parsed.market_count,\n    has_results: parsed.has_results\n  }\n}];"
       }
     },
     {
@@ -293,7 +282,7 @@
       "name": "Respond Analyze",
       "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1.4,
-      "position": [1540, -220],
+      "position": [1760, -220],
       "parameters": {
         "respondWith": "json",
         "responseBody": "={{$json}}",
@@ -327,14 +316,45 @@
       }
     },
     {
-      "id": "b3",
-      "name": "Fetch Query",
+      "id": "b2b",
+      "name": "Set Reporting Status",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [-880, 360],
       "parameters": {
+        "method": "PATCH",
+        "url": "={{$env.SUPABASE_URL + '/rest/v1/queries?id=eq.' + $json.session_id}}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "apikey",
+              "value": "={{$env.SUPABASE_SERVICE_ROLE_KEY}}"
+            },
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{$env.SUPABASE_SERVICE_ROLE_KEY}}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { status: 'reporting' } }}"
+      }
+    },
+    {
+      "id": "b3",
+      "name": "Fetch Query",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-660, 360],
+      "parameters": {
         "method": "GET",
-        "url": "={{$env.SUPABASE_URL + '/rest/v1/queries?id=eq.' + $json.session_id + '&select=*'}}",
+        "url": "={{$env.SUPABASE_URL + '/rest/v1/queries?id=eq.' + $('Validate Report Input').first().json.session_id + '&select=*'}}",
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
@@ -355,7 +375,7 @@
       "name": "Fetch Summary",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [-660, 360],
+      "position": [-440, 360],
       "parameters": {
         "method": "GET",
         "url": "={{$env.SUPABASE_URL + '/rest/v1/summaries?query_id=eq.' + $('Validate Report Input').first().json.session_id + '&select=*'}}",
@@ -379,7 +399,7 @@
       "name": "Fetch Market Data",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [-440, 360],
+      "position": [-220, 360],
       "parameters": {
         "method": "GET",
         "url": "={{$env.SUPABASE_URL + '/rest/v1/market_data?query_id=eq.' + $('Validate Report Input').first().json.session_id + '&select=market_title,volume_numeric,yes_probability,no_probability,sentiment'}}",
@@ -403,9 +423,9 @@
       "name": "Prepare Report Prompt",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [-220, 360],
+      "position": [0, 360],
       "parameters": {
-        "jsCode": "const query = $('Fetch Query').first().json?.[0] ?? $('Fetch Query').first().json;\nconst summary = $('Fetch Summary').first().json?.[0] ?? $('Fetch Summary').first().json;\nconst markets = $('Fetch Market Data').first().json;\n\nif (!query?.id) throw new Error('Session not found');\nif (!summary?.summary_text) throw new Error('Summary not found for session');\n\nconst marketList = Array.isArray(markets) ? markets : [];\n\nreturn [{\n  json: {\n    query_id: query.id,\n    question: query.question,\n    summary_text: summary.summary_text,\n    markets: marketList\n  }\n}];"
+        "jsCode": "const query = $('Fetch Query').first().json?.[0] ?? $('Fetch Query').first().json;\nconst summary = $('Fetch Summary').first().json?.[0] ?? $('Fetch Summary').first().json;\nconst markets = $('Fetch Market Data').first().json;\n\nif (!query?.id) throw new Error('Session not found');\nif (!summary?.summary_text) throw new Error('Summary not found for session');\n\nconst marketList = Array.isArray(markets) ? markets : [];\n\nreturn [{\n  json: {\n    query_id: query.id,\n    question: query.question,\n    summary_text: summary.summary_text,\n    markets: marketList,\n    has_results: marketList.length > 0\n  }\n}];"
       }
     },
     {
@@ -413,7 +433,7 @@
       "name": "Generate Report",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [0, 360],
+      "position": [220, 360],
       "parameters": {
         "method": "POST",
         "url": "https://api.openai.com/v1/chat/completions",
@@ -432,7 +452,7 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ {\n  model: 'gpt-4o-mini',\n  messages: [\n    {\n      role: 'system',\n      content: 'Output markdown only. Structure: Executive Summary, Market Evidence, Scenario Analysis (Base/Bull/Bear), Implications for Decision Makers, Monitoring Signals, Appendix. Target 900-1400 words. Use only provided data and call out uncertainty.'\n    },\n    {\n      role: 'user',\n      content: JSON.stringify({\n        question: $json.question,\n        summary: $json.summary_text,\n        markets: $json.markets\n      })\n    }\n  ],\n  temperature: 0.35\n} }}",
+        "jsonBody": "={{ {\n  model: 'gpt-4o-mini',\n  messages: [\n    {\n      role: 'system',\n      content: $json.has_results\n        ? 'Output markdown only. Structure: Executive Summary, Market Evidence, Scenario Analysis (Base/Bull/Bear), Implications for Decision Makers, Monitoring Signals, Appendix. Target 900-1400 words. Use only provided data and call out uncertainty.'\n        : 'Output markdown only. The user asked a question but no relevant prediction markets were found. Structure: Executive Summary (acknowledge the question and note no matching markets exist), General Context (provide brief general knowledge context about the topic), Limitations (explain why prediction market data is unavailable), Recommendations (suggest alternative data sources or approaches). Target 400-600 words.'\n    },\n    {\n      role: 'user',\n      content: JSON.stringify({\n        question: $json.question,\n        summary: $json.summary_text,\n        markets: $json.markets\n      })\n    }\n  ],\n  temperature: 0.35\n} }}",
         "options": {
           "timeout": 60000
         }
@@ -443,7 +463,7 @@
       "name": "Parse Report",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [220, 360],
+      "position": [440, 360],
       "parameters": {
         "jsCode": "const report = $json?.choices?.[0]?.message?.content?.trim();\nif (!report) throw new Error('Missing report from model output');\n\nconst prepared = $('Prepare Report Prompt').first().json;\n\nreturn [{\n  json: {\n    query_id: prepared.query_id,\n    report_content: report\n  }\n}];"
       }
@@ -453,7 +473,7 @@
       "name": "Upsert Report",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [440, 360],
+      "position": [660, 360],
       "parameters": {
         "method": "POST",
         "url": "={{$env.SUPABASE_URL + '/rest/v1/reports'}}",
@@ -488,7 +508,7 @@
       "name": "Update Query Completed",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [660, 360],
+      "position": [880, 360],
       "parameters": {
         "method": "PATCH",
         "url": "={{$env.SUPABASE_URL + '/rest/v1/queries?id=eq.' + $('Parse Report').first().json.query_id}}",
@@ -519,7 +539,7 @@
       "name": "Build Report Response",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [880, 360],
+      "position": [1100, 360],
       "parameters": {
         "jsCode": "const report = $('Parse Report').first().json;\nreturn [{\n  json: {\n    session_id: report.query_id,\n    format: 'markdown',\n    report: report.report_content\n  }\n}];"
       }
@@ -529,7 +549,7 @@
       "name": "Respond Report",
       "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1.4,
-      "position": [1100, 360],
+      "position": [1320, 360],
       "parameters": {
         "respondWith": "json",
         "responseBody": "={{$json}}",
@@ -588,14 +608,25 @@
       "main": [
         [
           {
-            "node": "Search Polymarket",
+            "node": "Multi Search Polymarket",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Search Polymarket": {
+    "Multi Search Polymarket": {
+      "main": [
+        [
+          {
+            "node": "Filter Relevant Markets",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filter Relevant Markets": {
       "main": [
         [
           {
@@ -695,6 +726,17 @@
       ]
     },
     "Validate Report Input": {
+      "main": [
+        [
+          {
+            "node": "Set Reporting Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Set Reporting Status": {
       "main": [
         [
           {
@@ -810,5 +852,5 @@
   },
   "active": false,
   "pinData": {},
-  "versionId": "polyinsights-v1"
+  "versionId": "polyinsights-v2"
 }
