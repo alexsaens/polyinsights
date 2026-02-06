@@ -1,0 +1,814 @@
+{
+  "name": "PolyInsights - Analyze + Report",
+  "nodes": [
+    {
+      "id": "a1",
+      "name": "Webhook Analyze",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [-1320, -220],
+      "webhookId": "polyinsights-analyze-v1",
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "polyinsights/analyze/v1",
+        "responseMode": "responseNode",
+        "options": {}
+      }
+    },
+    {
+      "id": "a2",
+      "name": "Validate Analyze Input",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-1100, -220],
+      "parameters": {
+        "jsCode": "const body = $json.body ?? {};\nconst question = (body.question ?? '').toString().trim();\nconst userId = (body.user_id ?? '').toString().trim();\n\nif (!question) {\n  throw new Error('Missing required field: question');\n}\nif (!userId) {\n  throw new Error('Missing required field: user_id');\n}\n\nreturn [{\n  json: {\n    question,\n    user_id: userId\n  }\n}];"
+      }
+    },
+    {
+      "id": "a3",
+      "name": "Extract Intent",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-880, -220],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.openai.com/v1/chat/completions",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{$env.OPENAI_API_KEY}}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ {\n  model: 'gpt-4o-mini',\n  response_format: { type: 'json_object' },\n  messages: [\n    {\n      role: 'system',\n      content: 'You are an analyst extracting market-search intent from user questions. Return ONLY JSON with keys: keywords (array 3-8), sophistication_label (low|high), sophistication_score (0-100). No extra keys.'\n    },\n    {\n      role: 'user',\n      content: $json.question\n    }\n  ],\n  temperature: 0.2\n} }}",
+        "options": {
+          "timeout": 30000
+        }
+      }
+    },
+    {
+      "id": "a4",
+      "name": "Parse Intent",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-660, -220],
+      "parameters": {
+        "jsCode": "const openai = $json;\nconst content = openai?.choices?.[0]?.message?.content ?? '{}';\nlet parsed;\ntry {\n  parsed = JSON.parse(content);\n} catch {\n  parsed = {};\n}\n\nconst keywords = Array.isArray(parsed.keywords)\n  ? parsed.keywords.map(k => String(k).trim()).filter(Boolean).slice(0, 8)\n  : [];\n\nif (keywords.length === 0) {\n  keywords.push('general market');\n}\n\nconst label = parsed.sophistication_label === 'high' ? 'high' : 'low';\nlet score = Number(parsed.sophistication_score);\nif (!Number.isFinite(score)) score = label === 'high' ? 70 : 40;\nscore = Math.max(0, Math.min(100, Math.round(score)));\n\nconst question = $('Validate Analyze Input').first().json.question;\nconst userId = $('Validate Analyze Input').first().json.user_id;\n\nreturn [{\n  json: {\n    question,\n    user_id: userId,\n    keywords,\n    keywordsQuery: keywords.join(', '),\n    sophistication_label: label,\n    sophistication_score: score\n  }\n}];"
+      }
+    },
+    {
+      "id": "a5",
+      "name": "Insert Query",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-440, -220],
+      "parameters": {
+        "method": "POST",
+        "url": "={{$env.SUPABASE_URL + '/rest/v1/queries'}}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "apikey",
+              "value": "={{$env.SUPABASE_SERVICE_ROLE_KEY}}"
+            },
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{$env.SUPABASE_SERVICE_ROLE_KEY}}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "Prefer",
+              "value": "return=representation"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ {\n  user_id: $json.user_id,\n  question: $json.question,\n  sophistication_label: $json.sophistication_label,\n  sophistication_score: $json.sophistication_score,\n  status: 'analysis'\n} }}"
+      }
+    },
+    {
+      "id": "a6",
+      "name": "Search Polymarket",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-220, -220],
+      "parameters": {
+        "method": "GET",
+        "url": "https://gamma-api.polymarket.com/markets",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "search",
+              "value": "={{$('Parse Intent').first().json.keywordsQuery}}"
+            },
+            {
+              "name": "limit",
+              "value": "20"
+            },
+            {
+              "name": "active",
+              "value": "true"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 30000
+        }
+      }
+    },
+    {
+      "id": "a7",
+      "name": "Prepare Market Rows",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [0, -220],
+      "parameters": {
+        "jsCode": "const queryRow = $('Insert Query').first().json?.[0] ?? $('Insert Query').first().json;\nconst queryId = queryRow.id;\nif (!queryId) throw new Error('Missing query id from Supabase insert');\n\nconst base = $('Parse Intent').first().json;\nconst response = $json;\nconst markets = Array.isArray(response) ? response : (response?.data ?? response?.markets ?? []);\n\nconst toNum = (v) => {\n  const n = Number(v);\n  return Number.isFinite(n) ? n : null;\n};\n\nconst rows = markets.slice(0, 20).map((m) => {\n  const yes = toNum(m.yesPrice ?? m.outcomePrices?.[0] ?? m.probabilityYes);\n  const no = toNum(m.noPrice ?? m.outcomePrices?.[1] ?? m.probabilityNo);\n  let sentiment = 'neutral';\n  if (yes != null && no != null) {\n    if (yes - no > 0.1) sentiment = 'bullish';\n    else if (no - yes > 0.1) sentiment = 'bearish';\n    else sentiment = 'mixed';\n  }\n\n  return {\n    query_id: queryId,\n    market_id: String(m.id ?? m.slug ?? ''),\n    market_title: String(m.question ?? m.title ?? 'Untitled market'),\n    volume_numeric: toNum(m.volume ?? m.volumeNum ?? m.liquidity),\n    yes_probability: yes,\n    no_probability: no,\n    sentiment,\n    source: 'polymarket',\n    raw_payload: m\n  };\n});\n\nconst compact = rows.map(r => ({\n  title: r.market_title,\n  volume: r.volume_numeric,\n  yes: r.yes_probability,\n  no: r.no_probability,\n  sentiment: r.sentiment\n}));\n\nreturn [{\n  json: {\n    query_id: queryId,\n    question: base.question,\n    sophistication_label: base.sophistication_label,\n    sophistication_score: base.sophistication_score,\n    user_id: base.user_id,\n    market_rows: rows,\n    market_compact: compact\n  }\n}];"
+      }
+    },
+    {
+      "id": "a8",
+      "name": "Insert Market Data",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [220, -220],
+      "parameters": {
+        "method": "POST",
+        "url": "={{$env.SUPABASE_URL + '/rest/v1/market_data'}}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "apikey",
+              "value": "={{$env.SUPABASE_SERVICE_ROLE_KEY}}"
+            },
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{$env.SUPABASE_SERVICE_ROLE_KEY}}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{$json.market_rows}}"
+      }
+    },
+    {
+      "id": "a9",
+      "name": "Generate Summary",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [440, -220],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.openai.com/v1/chat/completions",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{$env.OPENAI_API_KEY}}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ {\n  model: 'gpt-4o-mini',\n  messages: [\n    {\n      role: 'system',\n      content: 'Write a 200-300 word executive summary with headings: Market Signal, What Drives It, Risks / Blind Spots. Use only supplied market data. If data is sparse, say confidence is low.'\n    },\n    {\n      role: 'user',\n      content: JSON.stringify({\n        question: $json.question,\n        markets: $json.market_compact\n      })\n    }\n  ],\n  temperature: 0.3\n} }}",
+        "options": {
+          "timeout": 45000
+        }
+      }
+    },
+    {
+      "id": "a10",
+      "name": "Parse Summary",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [660, -220],
+      "parameters": {
+        "jsCode": "const summary = $json?.choices?.[0]?.message?.content?.trim();\nif (!summary) throw new Error('Missing summary from model output');\n\nconst prep = $('Prepare Market Rows').first().json;\n\nreturn [{\n  json: {\n    query_id: prep.query_id,\n    user_id: prep.user_id,\n    summary_text: summary,\n    sophistication_label: prep.sophistication_label,\n    sophistication_score: prep.sophistication_score,\n    market_count: Array.isArray(prep.market_rows) ? prep.market_rows.length : 0\n  }\n}];"
+      }
+    },
+    {
+      "id": "a11",
+      "name": "Upsert Summary",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [880, -220],
+      "parameters": {
+        "method": "POST",
+        "url": "={{$env.SUPABASE_URL + '/rest/v1/summaries'}}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "apikey",
+              "value": "={{$env.SUPABASE_SERVICE_ROLE_KEY}}"
+            },
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{$env.SUPABASE_SERVICE_ROLE_KEY}}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "Prefer",
+              "value": "resolution=merge-duplicates,return=representation"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ {\n  query_id: $json.query_id,\n  summary_text: $json.summary_text,\n  model_name: 'gpt-4o-mini'\n} }}"
+      }
+    },
+    {
+      "id": "a12",
+      "name": "Update Query Review",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1100, -220],
+      "parameters": {
+        "method": "PATCH",
+        "url": "={{$env.SUPABASE_URL + '/rest/v1/queries?id=eq.' + $('Parse Summary').first().json.query_id}}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "apikey",
+              "value": "={{$env.SUPABASE_SERVICE_ROLE_KEY}}"
+            },
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{$env.SUPABASE_SERVICE_ROLE_KEY}}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { status: 'review' } }}"
+      }
+    },
+    {
+      "id": "a13",
+      "name": "Build Analyze Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1320, -220],
+      "parameters": {
+        "jsCode": "const parsed = $('Parse Summary').first().json;\nreturn [{\n  json: {\n    session_id: parsed.query_id,\n    summary: parsed.summary_text,\n    sophistication_label: parsed.sophistication_label,\n    sophistication_score: parsed.sophistication_score,\n    market_count: parsed.market_count\n  }\n}];"
+      }
+    },
+    {
+      "id": "a14",
+      "name": "Respond Analyze",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.4,
+      "position": [1540, -220],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{$json}}",
+        "options": {
+          "responseCode": 200
+        }
+      }
+    },
+    {
+      "id": "b1",
+      "name": "Webhook Report",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [-1320, 360],
+      "webhookId": "polyinsights-report-v1",
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "polyinsights/report/v1",
+        "responseMode": "responseNode",
+        "options": {}
+      }
+    },
+    {
+      "id": "b2",
+      "name": "Validate Report Input",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-1100, 360],
+      "parameters": {
+        "jsCode": "const body = $json.body ?? {};\nconst sessionId = (body.session_id ?? '').toString().trim();\nconst action = (body.action ?? '').toString().trim();\n\nif (!sessionId) throw new Error('Missing required field: session_id');\nif (action !== 'move_forward') throw new Error('Invalid action. Expected move_forward');\n\nreturn [{ json: { session_id: sessionId } }];"
+      }
+    },
+    {
+      "id": "b3",
+      "name": "Fetch Query",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-880, 360],
+      "parameters": {
+        "method": "GET",
+        "url": "={{$env.SUPABASE_URL + '/rest/v1/queries?id=eq.' + $json.session_id + '&select=*'}}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "apikey",
+              "value": "={{$env.SUPABASE_SERVICE_ROLE_KEY}}"
+            },
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{$env.SUPABASE_SERVICE_ROLE_KEY}}"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "b4",
+      "name": "Fetch Summary",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-660, 360],
+      "parameters": {
+        "method": "GET",
+        "url": "={{$env.SUPABASE_URL + '/rest/v1/summaries?query_id=eq.' + $('Validate Report Input').first().json.session_id + '&select=*'}}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "apikey",
+              "value": "={{$env.SUPABASE_SERVICE_ROLE_KEY}}"
+            },
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{$env.SUPABASE_SERVICE_ROLE_KEY}}"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "b5",
+      "name": "Fetch Market Data",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-440, 360],
+      "parameters": {
+        "method": "GET",
+        "url": "={{$env.SUPABASE_URL + '/rest/v1/market_data?query_id=eq.' + $('Validate Report Input').first().json.session_id + '&select=market_title,volume_numeric,yes_probability,no_probability,sentiment'}}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "apikey",
+              "value": "={{$env.SUPABASE_SERVICE_ROLE_KEY}}"
+            },
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{$env.SUPABASE_SERVICE_ROLE_KEY}}"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "b6",
+      "name": "Prepare Report Prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-220, 360],
+      "parameters": {
+        "jsCode": "const query = $('Fetch Query').first().json?.[0] ?? $('Fetch Query').first().json;\nconst summary = $('Fetch Summary').first().json?.[0] ?? $('Fetch Summary').first().json;\nconst markets = $('Fetch Market Data').first().json;\n\nif (!query?.id) throw new Error('Session not found');\nif (!summary?.summary_text) throw new Error('Summary not found for session');\n\nconst marketList = Array.isArray(markets) ? markets : [];\n\nreturn [{\n  json: {\n    query_id: query.id,\n    question: query.question,\n    summary_text: summary.summary_text,\n    markets: marketList\n  }\n}];"
+      }
+    },
+    {
+      "id": "b7",
+      "name": "Generate Report",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [0, 360],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.openai.com/v1/chat/completions",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{$env.OPENAI_API_KEY}}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ {\n  model: 'gpt-4o-mini',\n  messages: [\n    {\n      role: 'system',\n      content: 'Output markdown only. Structure: Executive Summary, Market Evidence, Scenario Analysis (Base/Bull/Bear), Implications for Decision Makers, Monitoring Signals, Appendix. Target 900-1400 words. Use only provided data and call out uncertainty.'\n    },\n    {\n      role: 'user',\n      content: JSON.stringify({\n        question: $json.question,\n        summary: $json.summary_text,\n        markets: $json.markets\n      })\n    }\n  ],\n  temperature: 0.35\n} }}",
+        "options": {
+          "timeout": 60000
+        }
+      }
+    },
+    {
+      "id": "b8",
+      "name": "Parse Report",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [220, 360],
+      "parameters": {
+        "jsCode": "const report = $json?.choices?.[0]?.message?.content?.trim();\nif (!report) throw new Error('Missing report from model output');\n\nconst prepared = $('Prepare Report Prompt').first().json;\n\nreturn [{\n  json: {\n    query_id: prepared.query_id,\n    report_content: report\n  }\n}];"
+      }
+    },
+    {
+      "id": "b9",
+      "name": "Upsert Report",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [440, 360],
+      "parameters": {
+        "method": "POST",
+        "url": "={{$env.SUPABASE_URL + '/rest/v1/reports'}}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "apikey",
+              "value": "={{$env.SUPABASE_SERVICE_ROLE_KEY}}"
+            },
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{$env.SUPABASE_SERVICE_ROLE_KEY}}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "Prefer",
+              "value": "resolution=merge-duplicates,return=representation"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ {\n  query_id: $json.query_id,\n  report_format: 'markdown',\n  report_content: $json.report_content,\n  status: 'completed'\n} }}"
+      }
+    },
+    {
+      "id": "b10",
+      "name": "Update Query Completed",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [660, 360],
+      "parameters": {
+        "method": "PATCH",
+        "url": "={{$env.SUPABASE_URL + '/rest/v1/queries?id=eq.' + $('Parse Report').first().json.query_id}}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "apikey",
+              "value": "={{$env.SUPABASE_SERVICE_ROLE_KEY}}"
+            },
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{$env.SUPABASE_SERVICE_ROLE_KEY}}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { status: 'completed' } }}"
+      }
+    },
+    {
+      "id": "b11",
+      "name": "Build Report Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [880, 360],
+      "parameters": {
+        "jsCode": "const report = $('Parse Report').first().json;\nreturn [{\n  json: {\n    session_id: report.query_id,\n    format: 'markdown',\n    report: report.report_content\n  }\n}];"
+      }
+    },
+    {
+      "id": "b12",
+      "name": "Respond Report",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.4,
+      "position": [1100, 360],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{$json}}",
+        "options": {
+          "responseCode": 200
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Webhook Analyze": {
+      "main": [
+        [
+          {
+            "node": "Validate Analyze Input",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Analyze Input": {
+      "main": [
+        [
+          {
+            "node": "Extract Intent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Intent": {
+      "main": [
+        [
+          {
+            "node": "Parse Intent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Intent": {
+      "main": [
+        [
+          {
+            "node": "Insert Query",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Insert Query": {
+      "main": [
+        [
+          {
+            "node": "Search Polymarket",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Search Polymarket": {
+      "main": [
+        [
+          {
+            "node": "Prepare Market Rows",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Market Rows": {
+      "main": [
+        [
+          {
+            "node": "Insert Market Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Insert Market Data": {
+      "main": [
+        [
+          {
+            "node": "Generate Summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate Summary": {
+      "main": [
+        [
+          {
+            "node": "Parse Summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Summary": {
+      "main": [
+        [
+          {
+            "node": "Upsert Summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Upsert Summary": {
+      "main": [
+        [
+          {
+            "node": "Update Query Review",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update Query Review": {
+      "main": [
+        [
+          {
+            "node": "Build Analyze Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Analyze Response": {
+      "main": [
+        [
+          {
+            "node": "Respond Analyze",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Webhook Report": {
+      "main": [
+        [
+          {
+            "node": "Validate Report Input",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Report Input": {
+      "main": [
+        [
+          {
+            "node": "Fetch Query",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Query": {
+      "main": [
+        [
+          {
+            "node": "Fetch Summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Summary": {
+      "main": [
+        [
+          {
+            "node": "Fetch Market Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Market Data": {
+      "main": [
+        [
+          {
+            "node": "Prepare Report Prompt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Report Prompt": {
+      "main": [
+        [
+          {
+            "node": "Generate Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate Report": {
+      "main": [
+        [
+          {
+            "node": "Parse Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Report": {
+      "main": [
+        [
+          {
+            "node": "Upsert Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Upsert Report": {
+      "main": [
+        [
+          {
+            "node": "Update Query Completed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update Query Completed": {
+      "main": [
+        [
+          {
+            "node": "Build Report Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Report Response": {
+      "main": [
+        [
+          {
+            "node": "Respond Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "active": false,
+  "pinData": {},
+  "versionId": "polyinsights-v1"
+}

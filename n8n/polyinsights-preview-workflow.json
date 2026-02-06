@@ -1,0 +1,226 @@
+{
+  "name": "PolyInsights - Public Preview",
+  "nodes": [
+    {
+      "id": "p1",
+      "name": "Webhook Preview",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [-860, 100],
+      "webhookId": "polyinsights-preview-v1",
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "polyinsights/preview/v1",
+        "responseMode": "responseNode"
+      }
+    },
+    {
+      "id": "p2",
+      "name": "Validate Input",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-640, 100],
+      "parameters": {
+        "jsCode": "const question = String($json.body?.question ?? '').trim();\nif (!question) throw new Error('Missing question');\nreturn [{ json: { question } }];"
+      }
+    },
+    {
+      "id": "p3",
+      "name": "Extract Keywords",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-420, 100],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.openai.com/v1/chat/completions",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{$env.OPENAI_API_KEY}}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { model: 'gpt-4o-mini', response_format: { type: 'json_object' }, messages: [ { role: 'system', content: 'Return JSON: {\\\"keywords\\\":[\\\"...\\\"]}. 3-8 concise keywords for prediction markets.' }, { role: 'user', content: $json.question } ], temperature: 0.2 } }}"
+      }
+    },
+    {
+      "id": "p4",
+      "name": "Parse Keywords",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-200, 100],
+      "parameters": {
+        "jsCode": "let parsed = {};\ntry { parsed = JSON.parse($json.choices?.[0]?.message?.content ?? '{}'); } catch {}\nconst keywords = Array.isArray(parsed.keywords) ? parsed.keywords.map((k) => String(k).trim()).filter(Boolean).slice(0, 8) : [];\nif (!keywords.length) keywords.push('general market');\nconst question = $('Validate Input').first().json.question;\nreturn [{ json: { question, keywordsQuery: keywords.join(', ') } }];"
+      }
+    },
+    {
+      "id": "p5",
+      "name": "Search Polymarket",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [20, 100],
+      "parameters": {
+        "method": "GET",
+        "url": "https://gamma-api.polymarket.com/markets",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "search",
+              "value": "={{$json.keywordsQuery}}"
+            },
+            {
+              "name": "limit",
+              "value": "12"
+            },
+            {
+              "name": "active",
+              "value": "true"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "p6",
+      "name": "Generate Summary",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [240, 100],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.openai.com/v1/chat/completions",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{$env.OPENAI_API_KEY}}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { model: 'gpt-4o-mini', messages: [ { role: 'system', content: 'Write a concise 180-260 word market summary based only on the provided data. Mention uncertainty when data is thin.' }, { role: 'user', content: JSON.stringify({ question: $('Parse Keywords').first().json.question, markets: $json }) } ], temperature: 0.3 } }}"
+      }
+    },
+    {
+      "id": "p7",
+      "name": "Build Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [460, 100],
+      "parameters": {
+        "jsCode": "const summary = String($json.choices?.[0]?.message?.content ?? '').trim();\nif (!summary) throw new Error('Missing summary');\nreturn [{ json: { summary } }];"
+      }
+    },
+    {
+      "id": "p8",
+      "name": "Respond Preview",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.4,
+      "position": [680, 100],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{$json}}"
+      }
+    }
+  ],
+  "connections": {
+    "Webhook Preview": {
+      "main": [
+        [
+          {
+            "node": "Validate Input",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Input": {
+      "main": [
+        [
+          {
+            "node": "Extract Keywords",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Keywords": {
+      "main": [
+        [
+          {
+            "node": "Parse Keywords",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Keywords": {
+      "main": [
+        [
+          {
+            "node": "Search Polymarket",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Search Polymarket": {
+      "main": [
+        [
+          {
+            "node": "Generate Summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate Summary": {
+      "main": [
+        [
+          {
+            "node": "Build Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Response": {
+      "main": [
+        [
+          {
+            "node": "Respond Preview",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "active": false,
+  "pinData": {},
+  "versionId": "polyinsights-preview-v1"
+}
