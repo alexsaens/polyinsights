@@ -31,16 +31,20 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [-880, -220],
+      "credentials": {
+        "openAiApi": {
+          "id": "kuUCvTOoi2Ig9EnW",
+          "name": "OpenAi account"
+        }
+      },
       "parameters": {
         "method": "POST",
         "url": "https://api.openai.com/v1/chat/completions",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "openAiApi",
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
-            {
-              "name": "Authorization",
-              "value": "=Bearer {{$env.OPENAI_API_KEY}}"
-            },
             {
               "name": "Content-Type",
               "value": "application/json"
@@ -167,16 +171,20 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [660, -220],
+      "credentials": {
+        "openAiApi": {
+          "id": "kuUCvTOoi2Ig9EnW",
+          "name": "OpenAi account"
+        }
+      },
       "parameters": {
         "method": "POST",
         "url": "https://api.openai.com/v1/chat/completions",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "openAiApi",
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
-            {
-              "name": "Authorization",
-              "value": "=Bearer {{$env.OPENAI_API_KEY}}"
-            },
             {
               "name": "Content-Type",
               "value": "application/json"
@@ -434,16 +442,20 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [220, 360],
+      "credentials": {
+        "openAiApi": {
+          "id": "kuUCvTOoi2Ig9EnW",
+          "name": "OpenAi account"
+        }
+      },
       "parameters": {
         "method": "POST",
         "url": "https://api.openai.com/v1/chat/completions",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "openAiApi",
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
-            {
-              "name": "Authorization",
-              "value": "=Bearer {{$env.OPENAI_API_KEY}}"
-            },
             {
               "name": "Content-Type",
               "value": "application/json"

@@ -30,16 +30,20 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [-420, 100],
+      "credentials": {
+        "openAiApi": {
+          "id": "kuUCvTOoi2Ig9EnW",
+          "name": "OpenAi account"
+        }
+      },
       "parameters": {
         "method": "POST",
         "url": "https://api.openai.com/v1/chat/completions",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "openAiApi",
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
-            {
-              "name": "Authorization",
-              "value": "=Bearer {{$env.OPENAI_API_KEY}}"
-            },
             {
               "name": "Content-Type",
               "value": "application/json"
@@ -48,7 +52,8 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ { model: 'gpt-4o-mini', response_format: { type: 'json_object' }, messages: [ { role: 'system', content: 'You convert user questions into prediction-market search queries for Polymarket. Return JSON: {\"entity\":\"<primary subject>\",\"queries\":[\"<phrase1>\",\"<phrase2>\",\"<phrase3>\"]}. Rules: 1) entity = the main named subject (company name, person name, country, event name). Keep it short — just the proper noun. 2) queries = EXACTLY 3 search phrases ordered broadest to narrowest: a) First query = JUST the entity name alone (e.g. \"OpenAI\"), b) Second query = entity + core topic in 2-3 words (e.g. \"OpenAI IPO\"), c) Third query = a slightly different angle or synonym (e.g. \"OpenAI public\"). 3) Do NOT use generic filler words like stock market, investment, financial news, predictions, 2024, 2025. 4) Polymarket titles are simple questions like \"Will X happen?\" — match that style.' }, { role: 'user', content: $json.question } ], temperature: 0.1 } }}"
+        "jsonBody": "={{ { model: 'gpt-4o-mini', response_format: { type: 'json_object' }, messages: [ { role: 'system', content: 'You convert user questions into prediction-market search queries for Polymarket. Return JSON: {\"entity\":\"<primary subject>\",\"queries\":[\"<phrase1>\",\"<phrase2>\",\"<phrase3>\"]}. Rules: 1) entity = the main named subject (company name, person name, country, event name). Keep it short — just the proper noun. 2) queries = EXACTLY 3 search phrases ordered broadest to narrowest: a) First query = JUST the entity name alone (e.g. \"OpenAI\"), b) Second query = entity + core topic in 2-3 words (e.g. \"OpenAI IPO\"), c) Third query = a slightly different angle or synonym (e.g. \"OpenAI public\"). 3) Do NOT use generic filler words like stock market, investment, financial news, predictions, 2024, 2025. 4) Polymarket titles are simple questions like \"Will X happen?\" — match that style.' }, { role: 'user', content: $json.question } ], temperature: 0.1 } }}",
+        "options": {}
       }
     },
     {
@@ -97,16 +102,20 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [680, 100],
+      "credentials": {
+        "openAiApi": {
+          "id": "kuUCvTOoi2Ig9EnW",
+          "name": "OpenAi account"
+        }
+      },
       "parameters": {
         "method": "POST",
         "url": "https://api.openai.com/v1/chat/completions",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "openAiApi",
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
-            {
-              "name": "Authorization",
-              "value": "=Bearer {{$env.OPENAI_API_KEY}}"
-            },
             {
               "name": "Content-Type",
               "value": "application/json"
