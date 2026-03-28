@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<host-apdu-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:description="@string/hce_service_description"
+    android:requireDeviceUnlock="true">
+    <aid-group
+        android:category="other"
+        android:description="@string/hce_aid_group_description">
+        <!-- Default AID — dynamically updated at runtime based on selected card -->
+        <aid-filter android:name="F0000000000000" />
+    </aid-group>
+</host-apdu-service>

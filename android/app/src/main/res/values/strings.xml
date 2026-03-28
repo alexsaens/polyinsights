@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">NFC Cloner</string>
+    <string name="hce_service_description">NFC Card Emulation Service</string>
+    <string name="hce_aid_group_description">Emulated card AID group</string>
+</resources>
